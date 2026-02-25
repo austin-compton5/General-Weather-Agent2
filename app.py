@@ -3,11 +3,12 @@ Gradio UI for the Weather Agent.
 """
 
 import os
+import re
 from datetime import datetime
 
 import gradio as gr
 from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
 from agent import create_agent
 
@@ -17,10 +18,11 @@ load_dotenv()
 agent = create_agent()
 
 
-def chat_stream(message: str, history: list, session_id: str):
-    """Process a chat message and stream the response."""
+def chat_stream(message: str, session_id: str):
+    """Stream agent response, yielding (text_chunk, lat_lng_str) tuples."""
     config = {"configurable": {"thread_id": session_id}}
     accumulated_content = ""
+    map_coords = ""
 
     for event in agent.stream(
         {"messages": [HumanMessage(content=message)]},
@@ -28,30 +30,36 @@ def chat_stream(message: str, history: list, session_id: str):
         stream_mode="messages",
     ):
         msg, metadata = event
+
+        # Capture coordinates from get_weather_forecast tool calls
+        if isinstance(msg, AIMessage) and msg.tool_calls:
+            for tc in msg.tool_calls:
+                if tc["name"] == "get_weather_forecast":
+                    lat = tc["args"].get("latitude")
+                    lng = tc["args"].get("longitude")
+                    if lat is not None and lng is not None:
+                        map_coords = f"{lat},{lng}"
+
+        # Capture coordinates from geocode_address tool results
+        if isinstance(msg, ToolMessage):
+            lat_m = re.search(r"Latitude:\s*([-\d.]+)", str(msg.content))
+            lng_m = re.search(r"Longitude:\s*([-\d.]+)", str(msg.content))
+            if lat_m and lng_m:
+                map_coords = f"{lat_m.group(1)},{lng_m.group(1)}"
+
         if isinstance(msg, AIMessage) and msg.content:
             if isinstance(msg.content, str):
                 accumulated_content += msg.content
-                yield accumulated_content
+                yield accumulated_content, map_coords
 
     if not accumulated_content:
-        yield "I'm sorry, I couldn't process that request."
+        yield "I'm sorry, I couldn't process that request.", map_coords
 
 
 MAP_HTML = """
 <p style="font-size:0.82rem; color:#6b7280; margin:0 0 8px; line-height:1.4;">
-  Drag the pin, click the map, or search for a city. The location is used for weather queries.
+  Drag the pin or click the map to set your location for weather queries.
 </p>
-<div style="display:flex; gap:8px; margin-bottom:8px;">
-  <input id="map-addr-input" type="text" placeholder="Search city or address..."
-    style="flex:1; padding:7px 12px; border-radius:10px; border:1px solid #e5e7eb;
-           font-size:0.88rem; outline:none; font-family:inherit; box-sizing:border-box;"
-    onkeydown="if(event.key==='Enter') window.weatherMapSearch()"/>
-  <button onclick="window.weatherMapSearch()"
-    style="padding:7px 14px; background:#6366f1; color:#fff; border:none;
-           border-radius:10px; cursor:pointer; font-size:0.88rem; font-family:inherit;">
-    Search
-  </button>
-</div>
 <div id="weather-map" style="height:400px; border-radius:14px; overflow:hidden;
      border:1px solid #e5e7eb; isolation:isolate;"></div>
 <div id="map-coord-status"
@@ -104,31 +112,6 @@ function _pushCoords(lat, lng) {
   };
   tryPush();
 }
-
-window.weatherMapSearch = async function() {
-  var root = _mapRoot();
-  var inp = root && root.querySelector('#map-addr-input');
-  var q = inp ? inp.value.trim() : '';
-  if (!q) return;
-  var st = root && root.querySelector('#map-coord-status');
-  if (st) { st.textContent = 'Searching\u2026'; st.style.color = '#9ca3af'; }
-  try {
-    var r = await fetch(
-      'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q),
-      { headers: { 'Accept-Language': 'en' } }
-    );
-    var d = await r.json();
-    if (d.length > 0) {
-      if (window.weatherMapPlaceMarker)
-        window.weatherMapPlaceMarker(parseFloat(d[0].lat), parseFloat(d[0].lon), 17);
-      if (inp) inp.value = d[0].display_name;
-    } else {
-      if (st) { st.textContent = 'Location not found.'; st.style.color = '#ef4444'; }
-    }
-  } catch (e) {
-    if (st) { st.textContent = 'Search error.'; st.style.color = '#ef4444'; }
-  }
-};
 
 function _initMap() {
   var root = _mapRoot();
@@ -252,6 +235,7 @@ footer {
 }
 
 /* Map widget */
+#coord-box { display: none; }
 #weather-map { isolation: isolate; }
 .leaflet-pane { z-index: 1 !important; }
 .leaflet-top, .leaflet-bottom { z-index: 2 !important; }
@@ -337,13 +321,13 @@ def create_gradio_app():
         )
 
         session_id = gr.State(value=lambda: f"session_{datetime.now().timestamp()}")
-        pin_coords = gr.State(value="")
 
         with gr.Row(equal_height=False):
             # Left column: map
             with gr.Column(scale=2, min_width=280):
                 gr.HTML(value=MAP_HTML, elem_id="map-widget", js_on_load=MAP_JS)
-                coord_box = gr.Textbox(elem_id="coord-box", visible=False)
+                coord_box = gr.Textbox(elem_id="coord-box", visible=True, container=False, label="")
+                map_out_box = gr.Textbox(elem_id="map-out-box", visible=False)
 
             # Right column: chat
             with gr.Column(scale=3, min_width=320):
@@ -385,16 +369,13 @@ def create_gradio_app():
                     outputs=[chatbot, session_id],
                 )
 
-        # Wire JS bridge → pin_coords state
-        coord_box.change(fn=lambda c: c, inputs=[coord_box], outputs=[pin_coords])
-
         # --- Event wiring ---
         def respond(message, chat_history, session, coords):
             text = message.get("text", "").strip()
             files = message.get("files", [])
 
             if not text and not files:
-                yield None, chat_history
+                yield None, chat_history, ""
                 return
 
             # Inject location into agent message (user sees original text)
@@ -419,13 +400,27 @@ def create_gradio_app():
             if text:
                 chat_history = chat_history + [{"role": "user", "content": text}]
                 chat_history = chat_history + [{"role": "assistant", "content": ""}]
-                for partial_response in chat_stream(agent_text, chat_history, session):
+                for partial_response, map_coords in chat_stream(agent_text, session):
                     chat_history[-1]["content"] = partial_response
-                    yield None, chat_history
+                    yield None, chat_history, map_coords
             else:
-                yield None, chat_history
+                yield None, chat_history, ""
 
-        msg.submit(respond, [msg, chatbot, session_id, pin_coords], [msg, chatbot])
+        map_out_box.change(
+            fn=None,
+            inputs=[map_out_box],
+            js="""(coords) => {
+                if (!coords) return;
+                var parts = coords.split(',');
+                if (parts.length === 2) {
+                    var lat = parseFloat(parts[0]);
+                    var lng = parseFloat(parts[1]);
+                    if (window.weatherMapPlaceMarker) window.weatherMapPlaceMarker(lat, lng, 13);
+                }
+            }""",
+        )
+
+        msg.submit(respond, [msg, chatbot, session_id, coord_box], [msg, chatbot, map_out_box])
 
     return demo
 

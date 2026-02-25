@@ -39,7 +39,8 @@ You need to collect these 6 pieces of information:
 6. **Timezone** - A timezone string like 'America/New_York', 'Europe/London', 'Asia/Tokyo', or 'auto'
 
 Guidelines:
-- If the user provides a city name instead of coordinates, help them by providing approximate coordinates for major cities
+- If the message starts with [My current location: latitude X, longitude Y], extract and use those coordinates directly — do not ask the user for their location
+- If the user provides a city name instead of coordinates, use the geocode_address tool to resolve it to coordinates
 - If dates are missing, ask for them. The forecast can be up to 16 days in the future
 - If temperature unit is not specified, ask their preference
 - If timezone is not specified, suggest 'auto' or ask for their timezone

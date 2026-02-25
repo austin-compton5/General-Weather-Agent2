@@ -2,10 +2,53 @@
 Open-Meteo API tool for weather forecasts.
 """
 
+import re
 from datetime import date, timedelta
 
 import httpx
 from langchain_core.tools import tool
+
+
+@tool
+def geocode_address(address: str) -> str:
+    """
+    Convert an address, city name, or place to geographic coordinates.
+    Always use this tool when the user provides a location as text rather than coordinates.
+
+    Args:
+        address: The address or place name to look up (e.g. "Paris, France", "1600 Pennsylvania Ave, Washington DC")
+
+    Returns:
+        The resolved location name, latitude, and longitude.
+    """
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            response = client.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={"format": "json", "limit": 1, "q": address},
+                headers={"User-Agent": "WeatherAgent/1.0", "Accept-Language": "en"},
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        if not data:
+            return f'Could not find a location matching "{address}". Try a different search term.'
+
+        result = data[0]
+        lat = float(result["lat"])
+        lng = float(result["lon"])
+        display_name = result.get("display_name", address)
+
+        return (
+            f'Location: "{display_name}"\n'
+            f"Latitude: {lat}\n"
+            f"Longitude: {lng}"
+        )
+
+    except httpx.HTTPStatusError as e:
+        return f"Geocoding API error: {e.response.status_code}"
+    except Exception as e:
+        return f"Geocoding error: {str(e)}"
 
 
 @tool
@@ -122,4 +165,4 @@ def get_weather_forecast(
 
 
 # List of all tools for easy import
-tools = [get_weather_forecast]
+tools = [geocode_address, get_weather_forecast]
