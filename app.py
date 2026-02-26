@@ -132,7 +132,7 @@ function _initMap() {
   if (!mapEl || typeof L === 'undefined') { setTimeout(_initMap, 200); return; }
   if (mapEl._leaflet_id) return;
 
-  var map = L.map(mapEl).setView([20, 0], 2);
+  var map = L.map(mapEl).setView([34.1425, -118.2551], 15);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
     maxZoom: 19
@@ -388,6 +388,7 @@ def create_gradio_app():
                 return
 
             # Prepend pinned location so agent uses it for the weather call
+            print(f"[DEBUG] coords at submit: {repr(coords)}")
             agent_text = text
             if text and coords:
                 parts = coords.split(",")
@@ -400,6 +401,7 @@ def create_gradio_app():
                         )
                     except ValueError:
                         pass
+            print(f"[DEBUG] agent_text: {repr(agent_text)}")
 
             for f in files:
                 chat_history = chat_history + [{"role": "user", "content": f}]
