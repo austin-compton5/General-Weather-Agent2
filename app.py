@@ -440,4 +440,4 @@ if __name__ == "__main__":
 
     demo = create_gradio_app()
     demo.queue()
-    demo.launch(share=False, css=CUSTOM_CSS, theme=gr.themes.Soft())
+    demo.launch(server_name="0.0.0.0", share=False, css=CUSTOM_CSS, theme=gr.themes.Soft())
