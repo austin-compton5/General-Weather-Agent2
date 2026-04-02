@@ -108,16 +108,14 @@ az containerapp env create \
 
 ---
 
-## Phase 2: Dockerfile Hardening (Required)
+## Phase 2: Dockerfile Hardening (Already Done)
 
-Two required changes before going live:
+Both required hardening changes are already in `Dockerfile`:
 
-1. **Pin Python version** — change `python:3.13-slim` → `python:3.13.10-slim`
-2. **Non-root user** — add before `EXPOSE`:
-   ```dockerfile
-   RUN adduser --disabled-password --gecos "" appuser && chown -R appuser /app
-   USER appuser
-   ```
+1. **Python version pinned** — `FROM python:3.13.10-slim` ✓
+2. **Non-root user** — `adduser appuser` + `USER appuser` before `EXPOSE` ✓
+
+No changes needed here.
 
 ---
 
@@ -152,14 +150,15 @@ az containerapp create \
   --image "$ACR_LOGIN_SERVER/weather-agent:$GIT_SHA" \
   --registry-server "$ACR_LOGIN_SERVER" \
   --registry-identity "$IDENTITY_ID" \
-  --user-assigned "$IDENTITY_ID" \
+  --mi-user-assigned "$IDENTITY_ID" \
   --target-port 7860 \
   --ingress external \
   --min-replicas 1 \
   --max-replicas 1 \
   --cpu 0.5 \
   --memory 1.0Gi \
-  --secrets "openai-api-key=keyvaultref:$OPENAI_SECRET_URI,identityref:$IDENTITY_ID" \
+  --termination-grace-period 60 \
+  --secrets "openai-api-key=keyvaultref:$OPENAI_SECRET_URI;identityref:$IDENTITY_ID" \
   --env-vars "OPENAI_API_KEY=secretref:openai-api-key" \
   --query properties.configuration.ingress.fqdn \
   --output tsv
@@ -169,7 +168,9 @@ The last two flags print the FQDN — go back to Phase 0 and add the real redire
 
 **Why these settings:**
 - `--registry-identity` — managed identity pulls images from ACR; no password needed or stored
-- `keyvaultref:` — the secret value is fetched from Key Vault at runtime and never stored in Container Apps config or appears in CLI history
+- `--mi-user-assigned` — attaches the managed identity to the container app so it can resolve the Key Vault secret at runtime
+- `keyvaultref:` with `;identityref:` — the secret value is fetched from Key Vault at runtime and never stored in Container Apps config or appears in CLI history
+- `--termination-grace-period 60` — gives in-flight WebSocket streams up to 60 seconds to finish before the replica is killed on redeploy
 - `--min-replicas 1 --max-replicas 1` — **required** due to `MemorySaver` single-instance constraint
 - `0.5 vCPU / 1.0 GiB` — Gradio + LangGraph is I/O-bound; sufficient for 20 users
 
@@ -197,11 +198,30 @@ az containerapp auth microsoft update \
   --resource-group "$RESOURCE_GROUP" \
   --client-id "<AZURE_CLIENT_ID>" \
   --client-secret "$AZURE_CLIENT_SECRET_VALUE" \
-  --tenant-id "<AZURE_TENANT_ID>" \
-  --allowed-audiences "api://<AZURE_CLIENT_ID>"
+  --tenant-id "<AZURE_TENANT_ID>"
 ```
 
 Easy Auth forwards `X-MS-CLIENT-PRINCIPAL-NAME` (and other identity headers) to the container, but Gradio doesn't need to read them for basic access gating — it simply blocks unauthenticated requests at the ingress layer.
+
+### Setting loginParameters (account picker)
+
+The Azure CLI cannot set `loginParameters` due to a bug with `=` in values ([#29330](https://github.com/Azure/azure-cli/issues/29330)). Use the REST API instead:
+
+```bash
+SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+az rest --method PATCH \
+  --url "https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.App/containerApps/$ACA_APP/authConfigs/current?api-version=2023-05-01" \
+  --body '{"properties":{"identityProviders":{"azureActiveDirectory":{"login":{"loginParameters":["prompt=select_account"]}}}}}'
+```
+
+This forces the Microsoft account picker on login (instead of silent auto-sign-in) when the user has an active Microsoft session. Verify with:
+
+```bash
+az containerapp auth show -g "$RESOURCE_GROUP" -n "$ACA_APP" --query "identityProviders.azureActiveDirectory.login.loginParameters"
+```
+
+Should return `["prompt=select_account"]` with no extra quotes.
 
 ---
 
@@ -265,14 +285,14 @@ Container Apps performs a rolling replacement (~10-30s downtime). Announce plann
 
 ```
 Resource Group: rg-weather-agent
-  ├── Azure Container Registry (Basic): acrweatheragent (admin disabled)
+  ├── Azure Container Registry (Basic): acrweatheragent42 (admin disabled)
   │     └── Images: weather-agent:latest + weather-agent:<git-sha>
-  ├── Key Vault: kv-weather-agent
+  ├── Key Vault: kv-weather-agent-contoso
   │     ├── Secret: openai-api-key
   │     └── Secret: azure-client-secret
   ├── Managed Identity: id-weather-agent
-  │     ├── Role: AcrPull on acrweatheragent
-  │     └── Role: Key Vault Secrets User on kv-weather-agent
+  │     ├── Role: AcrPull on acrweatheragent42
+  │     └── Role: Key Vault Secrets User on kv-weather-agent-contoso
   ├── Container Apps Environment: env-weather-agent
   │     └── Container App: weather-agent
   │           ├── Ingress: external HTTPS (TLS managed automatically)
